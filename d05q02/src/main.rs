@@ -1,11 +1,9 @@
-use rayon::prelude::*;
-use std::collections::HashMap;
+use std::collections::BTreeSet;
 use std::fs;
-use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::Arc;
 
 const DEFAULT_FILE_PATH: &str = "./input.txt";
 
+#[derive(Debug, Clone, Copy)]
 struct SeedData {
     seed: i64,
     range: i64,
@@ -33,15 +31,12 @@ impl Map {
         }
     }
 
-    fn invert(&self) -> HashMap<i64, i64> {
-        (0..self.range)
-            .into_par_iter()
-            .map(|i| {
-                let src = self.source + i;
-                let dest = self.destination + i;
-                (dest, src)
-            })
-            .collect()
+    fn source_to_destination(&self, source: i64) -> Option<i64> {
+        if self.source <= source && source < (self.source + self.range) {
+            Some(source - self.source + self.destination)
+        } else {
+            None
+        }
     }
 }
 
@@ -56,7 +51,7 @@ enum MapType {
 }
 
 struct Maps {
-    maps: Vec<HashMap<i64, i64>>,
+    maps: Vec<Map>,
 }
 
 impl Maps {
@@ -65,17 +60,51 @@ impl Maps {
     }
 
     fn add_map(&mut self, map: Map) {
-        println!("Adding map: {:?}", map);
-        self.maps.push(map.invert()); // Store inverted maps
+        self.maps.push(map);
     }
 
-    // Iterative binary search
-    fn map(&self, num: i64) -> i64 {
-        let mut result = num;
-        for map in &self.maps {
-            result = *map.get(&result).unwrap_or(&result); // Use binary search
+    fn convert(&self, source: i64) -> i64 {
+        match self
+            .maps
+            .iter()
+            .map(|entry| entry.source_to_destination(source))
+            .find_map(|e| e)
+        {
+            Some(dest) => dest,
+            None => source,
         }
-        result
+    }
+
+    fn convert_range(&self, range: (i64, i64)) -> Vec<(i64, i64)> {
+        let mut slices = BTreeSet::new();
+        let range_end = range.0 + range.1;
+
+        for entry in &self.maps {
+            let source_end = entry.source + entry.range;
+
+            if range_end < entry.source || range.0 > source_end {
+                continue;
+            }
+
+            if entry.source > range.0 {
+                slices.insert(entry.source);
+            }
+
+            if source_end < range_end {
+                slices.insert(source_end);
+            }
+        }
+        slices.insert(range_end);
+
+        let mut output = Vec::new();
+        let mut current = range.0;
+
+        for position in slices {
+            output.push((self.convert(current), position - current));
+            current = position;
+        }
+
+        output
     }
 }
 
@@ -131,11 +160,13 @@ fn main() {
             current_type = MapType::Location;
             return;
         }
+
         let values = line
             .1
             .split_whitespace()
             .map(|x| x.parse::<i64>().expect("Unable to parse number"))
             .collect::<Vec<i64>>();
+
         if values.len() == 3 {
             let map = Map::new(values[1], values[0], values[2]);
             match current_type {
@@ -150,29 +181,35 @@ fn main() {
         }
     });
 
-    let min_location = Arc::new(AtomicI64::new(i64::MAX));
-    seeds.par_iter().for_each(|seed| {
-        let seed_start = seed.seed;
-        let seed_end = seed.seed + seed.range;
-        for i in seed_start..seed_end {
-            let soil = seed_to_soil.map(i);
-            let fertilizer = soil_to_fertilizer.map(soil);
-            let water = fertilizer_to_water.map(fertilizer);
-            let light = water_to_light.map(water);
-            let temperature = light_to_temperature.map(light);
-            let humidity = temperature_to_humidity.map(temperature);
-            let location = humidity_to_location.map(humidity);
+    let all_maps = vec![
+        &seed_to_soil,
+        &soil_to_fertilizer,
+        &fertilizer_to_water,
+        &water_to_light,
+        &light_to_temperature,
+        &temperature_to_humidity,
+        &humidity_to_location,
+    ];
 
-            min_location.fetch_min(location, Ordering::SeqCst);
+    let mut current = seeds
+        .iter()
+        .map(|x| (x.seed, x.range))
+        .collect::<Vec<(i64, i64)>>();
+    let mut future = Vec::new();
+
+    for maps in all_maps {
+        for seed in &current {
+            future.extend(maps.convert_range(*seed));
         }
-    });
+        current = future;
+        future = Vec::new();
+    }
 
+    let min_location = current.iter().map(|x| x.0).min().unwrap_or(-1);
+
+    println!("Lowest Seed Location: {}", min_location);
     let full_elapsed = full_start.elapsed();
     println!("Total Run Time: {:?}", full_elapsed);
-    println!(
-        "Lowest Seed Location: {}",
-        min_location.load(Ordering::SeqCst)
-    );
 }
 
 fn parse_seeds(contents: &str) -> Vec<SeedData> {
@@ -195,6 +232,7 @@ fn parse_seeds(contents: &str) -> Vec<SeedData> {
     result
 }
 
+#[allow(dead_code)]
 fn test_data() -> &'static str {
     return "seeds: 79 14 55 13
 
